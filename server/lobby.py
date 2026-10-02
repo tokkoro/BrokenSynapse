@@ -10,6 +10,7 @@ ONLINE_PLAYERS_PATH = "psychoff/rankings.txt"
 FRIENDS_LIST_PATH = "psychoff/flist.txt"
 ACTIVE_GAMES_PATH = "psychoff/activeGames.txt"
 FEED_PATH = "psychoff/feed.txt"
+COMMENTS_PATH = "psychoff/gpCommentRec.txt"
 
 
 def home_screen(headline, text):
@@ -51,6 +52,17 @@ def feed(text):
     onFeedRec (feedClient.cs): markup text, shown under the client's own summary of games waiting for a turn.
     """
     return text.split("\n")
+
+
+def comments(mtid, game_comments):
+    """
+    onGamesCommentsRec (gamePageClient.cs): the match ID, then for each comment the commenter, the date (see
+    games.tm_date), the comment's lines and "CommentEnd".
+    """
+    lines = [str(mtid)]
+    for name, date, text in game_comments:
+        lines += [name, date] + text + ["CommentEnd"]
+    return lines
 
 
 def encode(lines):

@@ -7,6 +7,7 @@ client, the state of the match for that player.
 """
 import json
 import logging
+import time
 from pathlib import Path
 
 log = logging.getLogger("fsserver")
@@ -40,6 +41,15 @@ CLIENT_MERGE_BASE = "psychoff/lanMergeBase.enc"
 CLIENT_MERGE_P1 = "psychoff/lanMergeP1.enc"
 CLIENT_MERGE_P2 = "psychoff/lanMergeP2.enc"
 CLIENT_MERGE_OUT = "psychoff/lanMergeOut.enc"
+
+
+def tm_date(timestamp=None):
+    """
+    A date as the client's getPrettyDate (helper.cs) reads it: the fields of a C struct tm, years since 1900 and a
+    0-based month.
+    """
+    t = time.localtime(timestamp)
+    return "%d %d %d %d %d" % (t.tm_year - 1900, t.tm_mon - 1, t.tm_mday, t.tm_hour, t.tm_min)
 
 
 def read_enc_header(data):
@@ -126,7 +136,8 @@ def merge_turns_script(match, upload_path):
 
 
 class Match:
-    def __init__(self, mtid, player1, player2, game_mode, info, turn_limit, turn=0, submitted=None):
+    def __init__(self, mtid, player1, player2, game_mode, info, turn_limit, turn=0, submitted=None, finished=False,
+                 score=0, created=None, comments=None, likes=None):
         self.mtid = mtid
         self.player1 = player1
         self.player2 = player2
@@ -136,6 +147,18 @@ class Match:
         self.turn = turn
         self.submitted = submitted or []  # Players who have submitted the current turn.
         self.merging = None  # The player whose client is merging the current turn. Not saved.
+        self.finished = finished
+        # The final score, from player 1's point of view: positive if player 1 won, negative if player 2 won.
+        self.score = score
+        self.created = created or tm_date()
+        self.comments = comments or []  # [name, tm_date, [lines]]
+        self.likes = likes or []  # Players who like this game.
+
+    @property
+    def winner(self):
+        if not self.finished or self.score == 0:
+            return None
+        return self.player1 if self.score > 0 else self.player2
 
     def side_of(self, username):
         if username.lower() == self.player1.lower():
@@ -150,30 +173,11 @@ class Match:
     def has_submitted(self, username):
         return username.lower() in (p.lower() for p in self.submitted)
 
-    def client_header(self, username):
-        """
-        The 26 header fields of a recMT.enc for this player, as read by loadMTStage2 (mtInGame.cs).
-        """
-        opponent = self.opponent_of(username)
-        bidding = 1 if self.game_mode in BIDDING_MODES and self.turn == 0 else 0
-        return [
-            self.mtid, "", opponent, self.side_of(username), self.turn,
-            int(self.has_submitted(username)), self.info, bidding,
-            0,  # finished
-            0, "",  # spectating, player being spectated
-            0,  # declined
-            0,  # rating
-            "0 0", "0 0", "0 0",  # head-to-head, player 1 and player 2 win/loss records
-            0, 0, 1, 1,  # player 1 and 2 ranks and levels
-            self.player1, self.player2,
-            0,  # score
-            0, 0,  # timed turns, turn time
-            int(self.has_submitted(opponent)),
-        ]
-
     def to_json(self):
         return dict(mtid=self.mtid, player1=self.player1, player2=self.player2, game_mode=self.game_mode,
-                    info=self.info, turn_limit=self.turn_limit, turn=self.turn, submitted=self.submitted)
+                    info=self.info, turn_limit=self.turn_limit, turn=self.turn, submitted=self.submitted,
+                    finished=self.finished, score=self.score, created=self.created, comments=self.comments,
+                    likes=self.likes)
 
 
 class MatchStore:
@@ -220,6 +224,50 @@ class MatchStore:
         self.matches[match.mtid] = match
         self.save()
         return match
+
+    def record(self, username):
+        """
+        A player's (wins, losses) over finished matches.
+        """
+        played = [m for m in self.for_player(username) if m.winner]
+        wins = sum(1 for m in played if m.winner.lower() == username.lower())
+        return wins, len(played) - wins
+
+    def level(self, username):
+        """
+        A stand-in for the original server's levels, which aren't known: 1 plus the number of wins.
+        """
+        return 1 + self.record(username)[0]
+
+    def head_to_head(self, player1, player2):
+        """
+        (player 1's wins, player 2's wins) in finished matches between the two.
+        """
+        winners = [m.winner.lower() for m in self.for_player(player1) if m.winner and m.side_of(player2)]
+        return winners.count(player1.lower()), winners.count(player2.lower())
+
+    def client_header(self, match, username):
+        """
+        The 26 header fields of a recMT.enc for this player, as read by loadMTStage2 (mtInGame.cs).
+        """
+        opponent = match.opponent_of(username)
+        bidding = 1 if match.game_mode in BIDDING_MODES and match.turn == 0 and not match.finished else 0
+        p1_record, p2_record = self.record(match.player1), self.record(match.player2)
+        return [
+            match.mtid, "", opponent, match.side_of(username), match.turn,
+            int(match.has_submitted(username)), match.info, bidding, int(match.finished),
+            0, "",  # spectating, player being spectated
+            0,  # declined
+            len(match.likes),
+            "%d %d" % self.head_to_head(match.player1, match.player2),
+            "%d %d" % p1_record, "%d %d" % p2_record,
+            0, 0,  # player 1 and 2 ranks
+            self.level(match.player1), self.level(match.player2),
+            match.player1, match.player2,
+            match.score,
+            0, 0,  # timed turns, turn time
+            int(match.has_submitted(opponent)),
+        ]
 
     def get(self, mtid):
         try:

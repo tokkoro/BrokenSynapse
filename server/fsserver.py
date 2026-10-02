@@ -57,9 +57,6 @@ class ClientSession:
         self.username = None
         self.session_id = None
         self.salt = ""
-        self.level = 1
-        self.wins = 0
-        self.losses = 0
         # Like the client, send nothing else while a file waits for its fileFinished.
         self.outgoing = collections.deque()
         self.file_in_flight = None
@@ -90,6 +87,19 @@ class ClientSession:
                     match.merging = None
             self.writer.close()
 
+    # Shown in the online players list (lobby.online_players).
+    @property
+    def level(self):
+        return self.server.store.level(self.username)
+
+    @property
+    def wins(self):
+        return self.server.store.record(self.username)[0]
+
+    @property
+    def losses(self):
+        return self.server.store.record(self.username)[1]
+
     def send_line(self, *fields):
         self.outgoing.append(("line", "\t".join(str(f) for f in fields)))
         self.flush()
@@ -113,6 +123,8 @@ class ClientSession:
     def send_active_games(self):
         rows = []
         for m in self.server.store.for_player(self.username):
+            if m.finished:
+                continue
             needs_turn = int(not m.has_submitted(self.username))
             rows.append((m.mtid, m.opponent_of(self.username), m.game_mode, m.info, 0, needs_turn, m.turn))
         self.send_lobby_file(lobby.ACTIVE_GAMES_PATH, lobby.active_games(rows))
@@ -184,7 +196,8 @@ class ClientSession:
         while args and args[-1] == "":
             args.pop()
         name = name.lower()
-        if name in ("ping", "setmyos", "setclientingamestatus", "setdarkstatus", "selectsteamsessionid"):
+        if name in ("ping", "setmyos", "setclientingamestatus", "setdarkstatus", "selectsteamsessionid",
+                    "setawaystatus"):
             # The client pings every 8 seconds and expects no reply: a Ping command from the server makes
             # it ping again immediately. The status updates need no reply either.
             pass
@@ -200,6 +213,19 @@ class ClientSession:
             self.play_quick_match(*(args + ["", ""])[:2])
         elif name == "selectmt":
             self.select_match(args[0] if args else "")
+        elif name == "mtended":
+            self.end_match(*(args + ["", ""])[:2])
+        elif name == "requestgamepagenew":
+            self.send_game_page(args[0] if args else "")
+        elif name == "getcommentsforgame":
+            match = self.server.store.get(args[0] if args else "")
+            self.send_lobby_file(lobby.COMMENTS_PATH, lobby.comments(match.mtid if match else 0,
+                                                                     match.comments if match else []))
+        elif name == "rategame":
+            self.rate_game(*(args + ["", ""])[:2])
+        elif name == "getlevelfor":
+            player = args[0] if args else self.username
+            self.send_command("levelFor", player, self.server.store.level(player))
         else:
             log.info("%s unhandled command %s %r", self.peer, name, args)
 
@@ -250,7 +276,60 @@ class ClientSession:
             self.send_command("Error", "Game %s doesn't exist." % mtid)
             return
         data = self.server.store.base_file(match.mtid, match.turn).read_bytes()
-        self.send_file("psychoff/recMT.enc", games.replace_enc_header(data, match.client_header(self.username)))
+        header = self.server.store.client_header(match, self.username)
+        self.send_file("psychoff/recMT.enc", games.replace_enc_header(data, header))
+
+    def end_match(self, mtid, score):
+        """
+        mtEnded TAB match ID TAB score, sent by both players' clients when a match ends. The score is from player 1's
+        point of view (the game mode's getResult): positive if player 1 won, negative if player 2 won.
+        """
+        store = self.server.store
+        match = store.get(mtid)
+        if match is None or not match.side_of(self.username):
+            log.warning("%s mtEnded for unknown match %r", self.peer, mtid)
+            return
+        try:
+            score = float(score)
+        except ValueError:
+            log.warning("%s mtEnded with an invalid score %r", self.peer, score)
+            return
+        if match.finished:
+            if score != match.score:
+                log.warning("Match %d: %s reported score %s, but %s was reported first", match.mtid, self.username,
+                            score, match.score)
+            return
+        match.finished = True
+        match.score = score
+        store.save()
+        log.info("Match %d finished with score %s: %s", match.mtid, score,
+                 "%s won" % match.winner if match.winner else "a draw")
+
+    def send_game_page(self, mtid):
+        """
+        The game page in the browser (clientCmdGamePageInfoRec in gamePageClient.cs).
+        """
+        match = self.server.store.get(mtid)
+        if match is None:
+            self.send_command("gamePageNotExist", mtid)
+            return
+        self.send_command("GamePageInfoRec", match.mtid, match.player1, match.player2, match.created,
+                          int(match.finished), match.score, "", match.game_mode, len(match.likes), match.turn, "", "",
+                          "")
+
+    def rate_game(self, mtid, rating):
+        """
+        The Like button: a rating above 0 likes the game, anything else unlikes it.
+        """
+        match = self.server.store.get(mtid)
+        if match is None:
+            self.send_command("gamePageNotExist", mtid)
+            return
+        likes = [p for p in match.likes if p.lower() != self.username.lower()]
+        liked = rating not in ("", "0") and not rating.startswith("-")
+        match.likes = likes + [self.username] if liked else likes
+        self.server.store.save()
+        self.send_command("GameRated", 1 if liked else 0)
 
     def start_merge(self, match, after_submit):
         """
@@ -304,9 +383,26 @@ class ClientSession:
 
         if data is not None and path.lower().startswith("psychoff/grandserver/rec/") and path.lower().endswith(".enc"):
             self.handle_upload(data)
+        elif data is not None and path.lower().endswith(".cmt"):
+            self.add_comment(data)
         elif path.lower().endswith(".steamreg") and data is not None:
             # Account creation on Steam builds: username TAB password TAB email TAB Steam ticket.
             self.create_account(data.decode("latin-1").split("\t")[0].strip())
+
+    def add_comment(self, data):
+        """
+        A game page comment (addGameComment in gamePageClient.cs): the match ID, then the comment's lines.
+        """
+        lines = data.decode("latin-1").replace("\r", "").split("\n")
+        while lines and lines[-1] == "":
+            lines.pop()
+        match = self.server.store.get(lines[0].strip()) if lines else None
+        if match is None or len(lines) < 2:
+            log.warning("%s comment for unknown match or empty: %r", self.peer, lines[:2])
+            return
+        match.comments.append([self.username, games.tm_date(), lines[1:]])
+        self.server.store.save()
+        log.info("%s commented on match %d", self.peer, match.mtid)
 
     def create_account(self, username):
         """
