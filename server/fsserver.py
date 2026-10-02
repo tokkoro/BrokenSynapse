@@ -57,6 +57,7 @@ class ClientSession:
         self.username = None
         self.session_id = None
         self.salt = ""
+        self.current_match = None  # The match this player last opened, for in-game chat.
         # Like the client, send nothing else while a file waits for its fileFinished.
         self.outgoing = collections.deque()
         self.file_in_flight = None
@@ -223,6 +224,10 @@ class ClientSession:
                                                                      match.comments if match else []))
         elif name == "rategame":
             self.rate_game(*(args + ["", ""])[:2])
+        elif name == "messageopponent":
+            self.message_opponent(args[0] if args else "")
+        elif name == "declinegame":
+            self.delete_match(args[0] if args else "")
         elif name == "getlevelfor":
             player = args[0] if args else self.username
             self.send_command("levelFor", player, self.server.store.level(player))
@@ -276,6 +281,7 @@ class ClientSession:
             self.send_command("Error", "Game %s doesn't exist." % mtid)
             return
         data = self.server.store.base_file(match.mtid, match.turn).read_bytes()
+        self.current_match = match.mtid
         header = self.server.store.client_header(match, self.username)
         self.send_file("psychoff/recMT.enc", games.replace_enc_header(data, header))
 
@@ -304,6 +310,35 @@ class ClientSession:
         store.save()
         log.info("Match %d finished with score %s: %s", match.mtid, score,
                  "%s won" % match.winner if match.winner else "a draw")
+
+    def message_opponent(self, text):
+        """
+        In-game chat (messageOpponent in ircBox.cs). It carries only the text, so it goes to the opponent in the match
+        this player last opened.
+        """
+        match = self.server.store.get(self.current_match) if self.current_match else None
+        if match is None or not text:
+            return
+        opponent = self.server.session_for(match.opponent_of(self.username))
+        if opponent is None:
+            self.send_command("opponentNotHereForMsg")
+            return
+        opponent.send_command("opponentMessage", self.username, text, time.strftime("%H:%M"))
+
+    def delete_match(self, mtid):
+        """
+        The Delete Game button (doDecline in gamePageClient.cs), available to either player.
+        """
+        match = self.server.store.get(mtid)
+        if match is None or not match.side_of(self.username):
+            self.send_command("DeclineFailed", "That game doesn't exist.")
+            return
+        self.server.store.delete(match.mtid)
+        log.info("%s deleted match %d", self.peer, match.mtid)
+        self.send_command("GameDeclined")
+        opponent = self.server.session_for(match.opponent_of(self.username))
+        if opponent:
+            opponent.send_command("oppHasDeclined", self.username, match.mtid)
 
     def send_game_page(self, mtid):
         """

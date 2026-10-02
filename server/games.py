@@ -7,6 +7,7 @@ client, the state of the match for that player.
 """
 import json
 import logging
+import shutil
 import time
 from pathlib import Path
 
@@ -268,6 +269,11 @@ class MatchStore:
             0, 0,  # timed turns, turn time
             int(match.has_submitted(opponent)),
         ]
+
+    def delete(self, mtid):
+        del self.matches[mtid]
+        shutil.rmtree(self.match_dir(mtid), ignore_errors=True)
+        self.save()
 
     def get(self, mtid):
         try:
