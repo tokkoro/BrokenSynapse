@@ -124,12 +124,13 @@ COMPARISON = {
 def translate_opcode(version, opcode):
     if opcode >= 0x1000:  # Don't muddle my opcodes
         return opcode
+    # Translations cascade: version 36 opcodes are first mapped to their version 44 equivalent.
     if version <= 36:
         if opcode >= 67:
-            return opcode + 2
+            opcode += 2
         elif opcode >= 46:
-            return opcode + 1
-    elif version <= 44:
+            opcode += 1
+    if version <= 44:
         if opcode >= 82:
             return opcode + 4
         elif opcode >= 81:
