@@ -35,11 +35,45 @@ def is_number(s):
     """
     Checks whether the contents of a string are actually a number.
     """
+    # float() also accepts surrounding whitespace and words such as "nan", which must stay quoted.
+    if s != s.strip() or s.lower().lstrip("+-") in ("nan", "inf", "infinity"):
+        return False
     try:
         float(s)
         return True
     except ValueError:
         return False
+
+
+# TorqueScript's color codes (\c0 - \c9, \cr, \cp, \co), indexed by the character they produce.
+COLOR_ESCAPES = {
+    "\x02": r"\c0", "\x03": r"\c1", "\x04": r"\c2", "\x05": r"\c3", "\x06": r"\c4", "\x07": r"\c5",
+    "\x08": r"\c6", "\x0b": r"\c7", "\x0c": r"\c8", "\x0e": r"\c9", "\x0f": r"\cr", "\x10": r"\cp",
+    "\x11": r"\co",
+}
+
+
+def escape_string(s, quote):
+    """
+    Escapes a string so it can be written as a TorqueScript literal delimited by the given quote character.
+    """
+    escaped = ""
+    for c in s:
+        if c == "\\" or c == quote:
+            escaped += "\\" + c
+        elif c == "\n":
+            escaped += r"\n"
+        elif c == "\t":
+            escaped += r"\t"
+        elif c == "\r":
+            escaped += r"\r"
+        elif c in COLOR_ESCAPES:
+            escaped += COLOR_ESCAPES[c]
+        elif ord(c) < 0x20:
+            escaped += r"\x%02x" % ord(c)
+        else:
+            escaped += c
+    return escaped
 
 
 def partial_decompile(dso, start, end, in_function, previous_offset=0):
@@ -122,17 +156,16 @@ def decompile(dso, sink=None, in_function=False, offset=0):
         ip += 1
 
         if opcode == "OP_DOCBLOCK_STR":
-            print(indentation*"\t" + "///%s" % dso.get_string(dso.code[ip], in_function), file=sink)
+            print(indentation*"\t" + "///%s" % dso.get_string(dso.code[ip], in_function).rstrip("\n"), file=sink)
             ip += 1
         elif opcode == "OP_LOADIMMED_STR" or opcode == "OP_TAG_TO_STR":
             op = dso.get_string(dso.code[ip], in_function)
             ip += 1
             # Some floats may be represented as string literals. Omit brackets for those.
             if opcode == "OP_TAG_TO_STR":  # Tagged strings are encased in single quotes.
-                string_stack.append('%s' % op if is_number(op) else "'%s'" % op)
+                string_stack.append('%s' % op if is_number(op) else "'%s'" % escape_string(op, "'"))
             else:
-                # Also escape any double quote in the string.
-                string_stack.append('%s' % op if is_number(op) else '"%s"' % op.replace('"', r'\"'))
+                string_stack.append('%s' % op if is_number(op) else '"%s"' % escape_string(op, '"'))
         elif opcode == "OP_SETCURVAR_CREATE" or opcode == "OP_SETCURVAR":
             current_variable = dso.get_string(dso.code[ip])  # Always lookup in the global ST for this opcode
             ip += ste_size
@@ -597,7 +630,7 @@ def decompile(dso, sink=None, in_function=False, offset=0):
             op = int_stack.pop()
             int_stack.append("%s || %s" % (int_stack.pop(), op))
         elif opcode == "OP_ASSERT":
-            print(indentation*"\t" + "assert(\"%s\");" % dso.get_string(dso.code[ip], in_function), file=sink)
+            print(indentation*"\t" + "assert(\"%s\");" % escape_string(dso.get_string(dso.code[ip], in_function), '"'), file=sink)
             ip += 1
         elif opcode == "OP_ITER_BEGIN":
             ind = indentation*"\t"

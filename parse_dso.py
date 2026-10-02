@@ -73,12 +73,9 @@ class DSOFile:
             stb = self.global_string_table
         else:
             stb = self.function_string_table
-        st = stb.decode("UTF-8", "replace")
-        i = st.find("\ufffd")
-        while i != -1:
-            st = st[:i] + chr(stb[i]) + st[i + 1:]
-            i = st.find("\ufffd", i + 1)
-        return st[offset:st.find("\x00", offset)].rstrip("\n")
+        # Latin-1 maps every byte to one character, so offsets into the table stay valid.
+        st = stb.decode("latin-1")
+        return st[offset:st.find("\x00", offset)]
 
     def get_float(self, pos, in_function = False):
         """
@@ -134,7 +131,7 @@ def main():
                     outfile = f[:-4]  # file.cs.dso -> file.cs
                 else:
                     outfile = "%s.cs" % f  # file -> file.cs
-                out = open(outfile, 'w')
+                out = open(outfile, 'w', encoding="latin-1")  # Write back the original bytes
 
             # Create a backup of the original DSO in case the decompiled one is broken.
             if not os.path.exists("%s.bak" % f) and not args.stdout:
