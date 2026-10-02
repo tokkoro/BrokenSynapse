@@ -1,0 +1,6 @@
+# Player accounts for the Frozen Synapse LAN server.
+# Copy this file to accounts.txt and edit it. One account per line: a name and a password, separated by spaces.
+# Names are not case-sensitive. Passwords may only contain letters and digits.
+# The server reads the file again after every change, so there's no need to restart it.
+tomi changeme1
+joel changeme2

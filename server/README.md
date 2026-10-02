@@ -8,6 +8,7 @@ dialog (quick match against a named opponent) and plays them turn by turn. All t
 - `fsserver.py` handles connections and messages.
 - `lobby.py` builds the lobby's text files.
 - `games.py` stores matches in `server/data/` and reads and writes `.enc` headers.
+- `accounts.py` checks logins against `server/accounts.txt`.
 
 The server never runs game logic itself; it asks a client to, by sending a script (`Eval`):
 
@@ -28,11 +29,21 @@ python3 server/fsserver.py
 Options: `--host` and `--port` (default `0.0.0.0:28021`), `--log-dir` (default `server/logs`) and `--upload-dir`
 (default `server/uploads`). Each run writes a new log file.
 
+## Accounts
+
+Copy `server/accounts.example.txt` to `server/accounts.txt` and list one `name password` per line. Passwords may only
+contain letters and digits, and names are not case-sensitive. The server picks up changes without a restart.
+
+The passwords are never sent over the network: the game sends a salted MD5 hash, which the server checks against the
+file. Creating an account from the game is refused, and players can only challenge names in the file.
+
+Without `accounts.txt`, anyone can log in with any name and password (use `--accounts` for another location).
+
 ## Connecting the game
 
 1. On the login screen, click **ADVANCED**.
 2. Enter the server's address (`127.0.0.1` on the same machine) and port `28021`.
 3. Use the test button to check the connection, then confirm the server.
-4. Log in with any username and password, or create an account. Both are accepted.
+4. Log in with a name and password from `accounts.txt`.
 
 The game remembers the address but not the choice to use it, so step 3 is needed on every launch.

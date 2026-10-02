@@ -16,6 +16,7 @@ import time
 import zlib
 from pathlib import Path
 
+import accounts
 import games
 import lobby
 
@@ -55,6 +56,7 @@ class ClientSession:
         self.peer = "%s:%d" % (host, port)
         self.username = None
         self.session_id = None
+        self.salt = ""
         self.level = 1
         self.wins = 0
         self.losses = 0
@@ -148,15 +150,25 @@ class ClientSession:
     def handle_textcom(self, fields):
         kind = fields[0].lower() if fields else ""
         if kind == "prelogon":
-            self.send_command("SaltRec", secrets.token_hex(8), "")
+            self.salt = secrets.token_hex(8)
+            self.send_command("SaltRec", self.salt, "")
         elif kind == "login":
-            username = fields[1]
-            version = fields[3] if len(fields) > 3 else "?"
-            log.info("%s login as %r, client version %s (any password accepted)", self.peer, username, version)
+            # login TAB name TAB MD5(salt + MD5(password)) TAB client version
+            username, client_hash, version = (fields + ["", "", ""])[1:4]
+            if self.server.accounts.enabled:
+                name = self.server.accounts.check_login(username, self.salt, client_hash)
+                if name is None:
+                    log.info("%s login as %r refused: wrong name or password", self.peer, username)
+                    self.send_command("LoginFailed", "Wrong username or password.")
+                    return
+                username = name
+                log.info("%s login as %r, client version %s", self.peer, username, version)
+            else:
+                log.info("%s login as %r, client version %s (no accounts file, any password accepted)", self.peer,
+                         username, version)
             self.log_in(username)
         elif kind == "newaccount":
-            log.info("%s new account %r (accepted)", self.peer, fields[1])
-            self.log_in(fields[1])
+            self.create_account(fields[1])
         elif kind == "servercheck":
             # The ADVANCED dialog's connection test.
             self.send_command("ServerRespond", len(self.server.players()))
@@ -221,7 +233,11 @@ class ClientSession:
             self.send_command("Error", "You can't challenge yourself.")
         elif '"' in opponent or "\\" in opponent:
             self.send_command("Error", "Invalid opponent name.")
+        elif self.server.accounts.enabled and self.server.accounts.find(opponent) is None:
+            self.send_command("Error", "There is no player called %s on this server." % opponent)
         else:
+            if self.server.accounts.enabled:
+                opponent = self.server.accounts.find(opponent)  # The name as written in the accounts file.
             log.info("%s quick match: %s vs %s, %s", self.peer, self.username, opponent, mode_name)
             self.send_command("Eval", games.create_match_script(mode_name, self.username, opponent, self.upload_path()))
 
@@ -290,8 +306,20 @@ class ClientSession:
             self.handle_upload(data)
         elif path.lower().endswith(".steamreg") and data is not None:
             # Account creation on Steam builds: username TAB password TAB email TAB Steam ticket.
-            username = data.decode("latin-1").split("\t")[0].strip()
-            log.info("%s new Steam account %r (accepted)", self.peer, username)
+            self.create_account(data.decode("latin-1").split("\t")[0].strip())
+
+    def create_account(self, username):
+        """
+        The game's Create Account dialog. Without an accounts file any name is accepted; with one, the admin
+        adds accounts to it instead.
+        """
+        if self.server.accounts.enabled:
+            log.info("%s new account %r refused: accounts are managed in %s", self.peer, username,
+                     self.server.accounts.path)
+            self.send_command("Error", "Accounts can't be created from the game on this server. "
+                                       "Ask the server admin to add one for you.")
+        else:
+            log.info("%s new account %r (no accounts file, accepted)", self.peer, username)
             self.log_in(username)
 
 
@@ -358,8 +386,9 @@ class ClientSession:
 
 
 class GrandServer:
-    def __init__(self, upload_dir, data_dir, cancel_kick):
+    def __init__(self, upload_dir, data_dir, accounts_file, cancel_kick):
         self.upload_dir = upload_dir
+        self.accounts = accounts.Accounts(accounts_file)
         self.store = games.MatchStore(data_dir)
         self.cancel_kick = cancel_kick
         self.sessions = set()
@@ -391,6 +420,8 @@ async def main():
     parser.add_argument("--log-dir", type=Path, default=here / "logs", help="Where session logs are written.")
     parser.add_argument("--upload-dir", type=Path, default=here / "uploads", help="Where received files are saved.")
     parser.add_argument("--data-dir", type=Path, default=here / "data", help="Where matches are stored.")
+    parser.add_argument("--accounts", type=Path, default=here / "accounts.txt",
+                        help="Accounts file, one 'name password' per line. Without it, anyone can log in.")
     parser.add_argument("--no-cancel-kick", action="store_true",
                         help="Don't cancel the client's 60 second kick timer after login.")
     parser.add_argument("--verbose", action="store_true", help="Also log the client's keepalive pings.")
@@ -402,7 +433,11 @@ async def main():
                         format="%(asctime)s %(levelname)s %(message)s",
                         handlers=[logging.StreamHandler(), logging.FileHandler(log_file, encoding="utf-8")])
 
-    server = GrandServer(args.upload_dir, args.data_dir, not args.no_cancel_kick)
+    server = GrandServer(args.upload_dir, args.data_dir, args.accounts, not args.no_cancel_kick)
+    if server.accounts.enabled:
+        log.info("Accounts are read from %s", args.accounts)
+    else:
+        log.warning("No accounts file at %s: anyone can log in with any name and password", args.accounts)
     listener = await asyncio.start_server(server.on_connect, args.host, args.port)
     log.info("Listening on %s:%d, logging to %s", args.host, args.port, log_file)
     async with listener:

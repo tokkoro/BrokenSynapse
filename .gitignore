@@ -60,3 +60,4 @@ target/
 server/logs/
 server/uploads/
 server/data/
+server/accounts.txt
