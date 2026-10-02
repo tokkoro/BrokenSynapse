@@ -48,7 +48,9 @@ class ClientSession:
                 if not line:
                     break
                 text = line.decode("latin-1").rstrip("\r\n")
-                is_ping = text.lower().startswith("textcom\tcommand\tping\t")
+                # The client's ping string already ends in "\n" and sendQ adds another, so every ping is
+                # followed by an empty line.
+                is_ping = text == "" or text.lower().startswith("textcom\tcommand\tping\t")
                 log.log(logging.DEBUG if is_ping else logging.INFO, "%s C>S %r", self.peer, text)
                 await self.handle_line(text)
                 await self.writer.drain()
