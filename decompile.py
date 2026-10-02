@@ -176,7 +176,7 @@ def decompile(dso, sink=None, in_function=False, offset=0):
                 done_object_opcode = "OP_FINISH_OBJECT"
             
             if previous_opcodes[0] == done_object_opcode:
-                print(indentation*"\t" + int_stack.pop(), file=sink)
+                print(indentation*"\t" + int_stack.pop() + ";", file=sink)
             else:
                 int_stack.pop()
         elif opcode == "OP_UINT_TO_FLT":
@@ -263,7 +263,10 @@ def decompile(dso, sink=None, in_function=False, offset=0):
             object_creation = "new %s(%s)\n" % (argv[0], argv[1] if argv[1] != "\"\"" else "")
             object_creation += indentation*"\t" + "{\n"
             if dso.version < 45:
-                assert int_stack.pop() == 0
+                # Top-level objects have a 0 placeholder for their handle. Nested ones have their parent's code
+                # on the stack instead, which is kept so OP_END_OBJECT can append the child to it.
+                if int_stack and int_stack[-1] == 0:
+                    int_stack.pop()
                 int_stack.append(object_creation)
             else:
                 object_creation_stack.append(object_creation)
@@ -291,14 +294,11 @@ def decompile(dso, sink=None, in_function=False, offset=0):
                 op = op[:-3-indentation]
             else:
                 op += indentation*"\t" + "}"
-            if dso.version < 45:
+            root = dso.code[ip]
+            if root:
                 int_stack.append(op)
             else:
-                root = dso.code[ip]
-                if root:
-                    int_stack.append(op)
-                else:
-                    int_stack.append(int_stack.pop() + indentation*"\t" + op + "\n")
+                int_stack.append(int_stack.pop() + indentation*"\t" + op + ";\n")
             ip += 1
         elif opcode == "OP_FINISH_OBJECT":
             pass
