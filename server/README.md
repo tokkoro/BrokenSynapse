@@ -26,8 +26,14 @@ Requires Python 3.8 or later, with no dependencies.
 python3 server/fsserver.py
 ```
 
-Options: `--host` and `--port` (default `0.0.0.0:28021`), `--log-dir` (default `server/logs`) and `--upload-dir`
-(default `server/uploads`). Each run writes a new log file.
+Options: `--host` and `--port` (default `0.0.0.0:28021`), `--log-dir` (default `server/logs`), `--data-dir` (default
+`server/data`) and `--accounts` (default `server/accounts.txt`). Each run writes a new log file. For protocol research,
+`--save-uploads` keeps a copy of every received file in `server/uploads` (or `--upload-dir`), and `--verbose` also logs
+the clients' keepalive pings.
+
+Uploads are only accepted after login (except the Steam build's account creation file) and are limited to 400,000
+bytes, the original server's limit, and 4 MB once decompressed. A client breaking these rules is disconnected. Players
+can only create matches they play in, against players in the accounts file.
 
 ## Accounts
 

@@ -35,15 +35,32 @@ def compress(data):
     return compressor.compress(data) + compressor.flush()
 
 
+# The largest upload accepted, compressed: the original server's limit ($maxFileRecSize in comm.cs).
+MAX_UPLOAD_SIZE = 400000
+# The largest upload accepted after decompression. Matches and turns are a few kilobytes.
+MAX_DECOMPRESSED_SIZE = 4 * 1024 * 1024
+
+
+class ProtocolError(Exception):
+    """
+    A client broke the rules badly enough to be disconnected.
+    """
+
+
 def decompress(data):
     """
-    Decompresses a file body sent with the "gz" flag. Returns the data and the format that worked.
+    Decompresses a file body sent with the "gz" flag. Returns the data and the format that worked, or (None, None).
+    Raises ProtocolError if the result is larger than MAX_DECOMPRESSED_SIZE.
     """
     for name, wbits in (("raw deflate", -zlib.MAX_WBITS), ("zlib", zlib.MAX_WBITS), ("gzip", 16 + zlib.MAX_WBITS)):
+        decompressor = zlib.decompressobj(wbits)
         try:
-            return zlib.decompress(data, wbits), name
+            result = decompressor.decompress(data, MAX_DECOMPRESSED_SIZE)
         except zlib.error:
-            pass
+            continue
+        if decompressor.unconsumed_tail:
+            raise ProtocolError("upload larger than %d bytes once decompressed" % MAX_DECOMPRESSED_SIZE)
+        return result, name
     return None, None
 
 
@@ -79,6 +96,8 @@ class ClientSession:
                 await self.writer.drain()
         except (ConnectionError, asyncio.IncompleteReadError) as e:
             log.info("%s connection lost: %r", self.peer, e)
+        except ProtocolError as e:
+            log.warning("%s disconnected: %s", self.peer, e)
         finally:
             log.info("%s disconnected (%s)", self.peer, self.username or "not logged in")
             self.server.sessions.discard(self)
@@ -394,25 +413,34 @@ class ClientSession:
         """
         Reads a file body sent after a writeFile line, saves it and confirms it with fileFinished.
         """
-        path = fields[1]
-        size = int(fields[2])
+        path = fields[1] if len(fields) > 1 else ""
+        try:
+            size = int(fields[2])
+        except (IndexError, ValueError):
+            raise ProtocolError("invalid writeFile line")
+        if not 0 <= size <= MAX_UPLOAD_SIZE:
+            raise ProtocolError("upload of %d bytes, the limit is %d" % (size, MAX_UPLOAD_SIZE))
+        # Before login, only the Steam build's account creation file is accepted.
+        if self.username is None and not path.lower().endswith(".steamreg"):
+            raise ProtocolError("upload of %s before logging in" % path)
         compressed = len(fields) > 3 and fields[3].lower() == "gz"
         body = await self.reader.readexactly(size)
         log.info("%s received %s: %d bytes%s", self.peer, path, size, ", compressed" if compressed else "")
 
-        stem = "%s_%s_%s" % (time.strftime("%Y%m%d-%H%M%S"), self.username or self.peer.replace(":", "_"),
-                             path.replace("/", "_"))
-        self.server.upload_dir.mkdir(parents=True, exist_ok=True)
-        (self.server.upload_dir / (stem + ".raw")).write_bytes(body)
         data = body
         if compressed:
             data, fmt = decompress(body)
             if data is None:
                 log.warning("%s could not decompress %s", self.peer, path)
             else:
-                expected = fields[4] if len(fields) > 4 else "?"
-                log.info("%s decompressed %s as %s: %d bytes (header says %s)", self.peer, path, fmt, len(data),
-                         expected)
+                log.info("%s decompressed %s as %s: %d bytes", self.peer, path, fmt, len(data))
+        if self.server.save_uploads:
+            # Copies for protocol research.
+            stem = "%s_%s_%s" % (time.strftime("%Y%m%d-%H%M%S"), self.username or self.peer.replace(":", "_"),
+                                 path.replace("/", "_"))
+            self.server.upload_dir.mkdir(parents=True, exist_ok=True)
+            (self.server.upload_dir / (stem + ".raw")).write_bytes(body)
+            if data is not None and compressed:
                 (self.server.upload_dir / stem).write_bytes(data)
         self.send_line("fileFinished", path)
 
@@ -466,6 +494,17 @@ class ClientSession:
         if kind == "MT_INIT":
             # MT_INIT TAB player 1 TAB player 2 TAB info TAB game mode TAB turn limit TAB ...
             player1, player2, info, game_mode, turn_limit = (header + [""] * 6)[1:6]
+            if self.username.lower() not in (player1.lower(), player2.lower()):
+                log.warning("%s refused match %s vs %s: not one of the players", self.peer, player1, player2)
+                self.send_command("EPRefused", "you can only create games you play in.")
+                return
+            if self.server.accounts.enabled:
+                names = [self.server.accounts.find(p) for p in (player1, player2)]
+                if None in names:
+                    missing = player1 if names[0] is None else player2
+                    self.send_command("EPRefused", "there is no player called %s on this server." % missing)
+                    return
+                player1, player2 = names  # As written in the accounts file.
             match = store.create(player1, player2, game_mode, info, turn_limit, data)
             log.info("%s created match %d: %s vs %s, %s", self.peer, match.mtid, player1, player2, game_mode)
             self.send_command("MTAccepted", match.mtid)
@@ -517,8 +556,9 @@ class ClientSession:
 
 
 class GrandServer:
-    def __init__(self, upload_dir, data_dir, accounts_file, cancel_kick):
+    def __init__(self, upload_dir, save_uploads, data_dir, accounts_file, cancel_kick):
         self.upload_dir = upload_dir
+        self.save_uploads = save_uploads
         self.accounts = accounts.Accounts(accounts_file)
         self.store = games.MatchStore(data_dir)
         self.cancel_kick = cancel_kick
@@ -549,7 +589,10 @@ async def main():
     parser.add_argument("--host", default="0.0.0.0", help="Address to listen on (default: all interfaces).")
     parser.add_argument("--port", type=int, default=28021, help="Port to listen on (default: 28021).")
     parser.add_argument("--log-dir", type=Path, default=here / "logs", help="Where session logs are written.")
-    parser.add_argument("--upload-dir", type=Path, default=here / "uploads", help="Where received files are saved.")
+    parser.add_argument("--save-uploads", action="store_true",
+                        help="Save a copy of every received file, for protocol research.")
+    parser.add_argument("--upload-dir", type=Path, default=here / "uploads",
+                        help="Where --save-uploads saves files (default: server/uploads).")
     parser.add_argument("--data-dir", type=Path, default=here / "data", help="Where matches are stored.")
     parser.add_argument("--accounts", type=Path, default=here / "accounts.txt",
                         help="Accounts file, one 'name password' per line. Without it, anyone can log in.")
@@ -564,7 +607,7 @@ async def main():
                         format="%(asctime)s %(levelname)s %(message)s",
                         handlers=[logging.StreamHandler(), logging.FileHandler(log_file, encoding="utf-8")])
 
-    server = GrandServer(args.upload_dir, args.data_dir, args.accounts, not args.no_cancel_kick)
+    server = GrandServer(args.upload_dir, args.save_uploads, args.data_dir, args.accounts, not args.no_cancel_kick)
     if server.accounts.enabled:
         log.info("Accounts are read from %s", args.accounts)
     else:
