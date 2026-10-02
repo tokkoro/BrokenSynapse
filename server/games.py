@@ -34,6 +34,13 @@ BIDDING_MODES = {"Secure", "Secure2", "SecureCamp", "Charge"}
 # Where the client builds a new match before uploading it.
 CLIENT_INIT_FILE = "psychoff/lanMatchInit.enc"
 
+# Where the client merges two turns: the turn's base state and both players' submitted turns go in, the merged
+# result comes out.
+CLIENT_MERGE_BASE = "psychoff/lanMergeBase.enc"
+CLIENT_MERGE_P1 = "psychoff/lanMergeP1.enc"
+CLIENT_MERGE_P2 = "psychoff/lanMergeP2.enc"
+CLIENT_MERGE_OUT = "psychoff/lanMergeOut.enc"
+
 
 def read_enc_header(data):
     """
@@ -90,6 +97,34 @@ def create_match_script(mode_name, player1, player2, upload_path):
     ])
 
 
+def merge_turns_script(match, upload_path):
+    """
+    TorqueScript, sent with Eval after the CLIENT_MERGE_* files, that makes a client merge both players' turns into
+    the next turn and upload it with an "MT_MERGED <mtid> <turn>" header.
+
+    It does what hotseatSubmitTurn (hotseat.cs) does: bidding modes run their processBiddingTurn during the bidding
+    phase, everything else goes through the engine's collateTurnFiles. processBiddingTurn reads the base state from
+    $hotseatBaseFile when given "hotseat" as the match ID (the original server read it from its own storage), so
+    that global points at the base file for the call.
+    """
+    p1, p2, base, out = (torque_string(f) for f in (CLIENT_MERGE_P1, CLIENT_MERGE_P2, CLIENT_MERGE_BASE,
+                                                    CLIENT_MERGE_OUT))
+    if match.game_mode in BIDDING_MODES and match.turn == 0:
+        merge = [
+            "$lanOldHotseatBase = $hotseatBaseFile;",
+            "$hotseatBaseFile = %s;" % base,
+            '%s.processBiddingTurn("hotseat", %s, %s, %d, %s);' % (match.game_mode, p1, p2, match.turn, out),
+            "$hotseatBaseFile = $lanOldHotseatBase;",
+        ]
+    else:
+        # The output is sent as a copy of the base state, like hotseat's $hotseatBaseFile.
+        merge = ["collateTurnFiles(%s, %s, %s);" % (p1, p2, out)]
+    return " ".join(merge + [
+        'writeEncHeader(%s, "MT_MERGED" TAB %d TAB %d);' % (out, match.mtid, match.turn),
+        "sendFileToGS(%s, %s, 1);" % (out, torque_string(upload_path)),
+    ])
+
+
 class Match:
     def __init__(self, mtid, player1, player2, game_mode, info, turn_limit, turn=0, submitted=None):
         self.mtid = mtid
@@ -100,6 +135,7 @@ class Match:
         self.turn_limit = turn_limit
         self.turn = turn
         self.submitted = submitted or []  # Players who have submitted the current turn.
+        self.merging = None  # The player whose client is merging the current turn. Not saved.
 
     def side_of(self, username):
         if username.lower() == self.player1.lower():

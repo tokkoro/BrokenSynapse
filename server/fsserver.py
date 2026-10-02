@@ -22,7 +22,7 @@ import lobby
 log = logging.getLogger("fsserver")
 
 MOTD_HEADLINE = "Welcome to the LAN server"
-MOTD_TEXT = "This server replaces the offline Grand Server.\nMatches can be created, but turns don't advance yet."
+MOTD_TEXT = "This server replaces the offline Grand Server.\nCreate a game against any player name to play."
 FEED_TEXT = "\nWelcome to the LAN server."
 
 
@@ -61,6 +61,7 @@ class ClientSession:
         # Like the client, send nothing else while a file waits for its fileFinished.
         self.outgoing = collections.deque()
         self.file_in_flight = None
+        self.merge_after_submit = False
 
     async def run(self):
         log.info("%s connected", self.peer)
@@ -81,6 +82,10 @@ class ClientSession:
         finally:
             log.info("%s disconnected (%s)", self.peer, self.username or "not logged in")
             self.server.sessions.discard(self)
+            for match in self.server.store.matches.values():
+                if self.username and match.merging == self.username:
+                    log.warning("Match %d: %s disconnected while merging, will retry", match.mtid, self.username)
+                    match.merging = None
             self.writer.close()
 
     def send_line(self, *fields):
@@ -200,6 +205,10 @@ class ClientSession:
         # Steam. Without it, the client keeps the DLC status it already has.
         self.send_command("setMyStats", self.level)
         self.send_active_games()
+        # Merge turns that are waiting, for example because the last merging client disconnected.
+        for match in self.server.store.for_player(username):
+            if len(match.submitted) == 2:
+                self.start_merge(match, after_submit=False)
 
     def play_quick_match(self, opponent, mode_name):
         """
@@ -226,6 +235,24 @@ class ClientSession:
             return
         data = self.server.store.base_file(match.mtid, match.turn).read_bytes()
         self.send_file("psychoff/recMT.enc", games.replace_enc_header(data, match.client_header(self.username)))
+
+    def start_merge(self, match, after_submit):
+        """
+        Asks this client to merge both players' turns into the next turn (see games.merge_turns_script). The
+        result comes back as an MT_MERGED upload.
+        """
+        if match.merging:
+            return
+        store = self.server.store
+        log.info("%s merging turn %d of match %d", self.peer, match.turn, match.mtid)
+        match.merging = self.username
+        self.merge_after_submit = after_submit
+        base = store.base_file(match.mtid, match.turn).read_bytes()
+        self.send_file(games.CLIENT_MERGE_BASE, base)
+        self.send_file(games.CLIENT_MERGE_OUT, base)
+        self.send_file(games.CLIENT_MERGE_P1, store.turn_file(match.mtid, match.turn, 1).read_bytes())
+        self.send_file(games.CLIENT_MERGE_P2, store.turn_file(match.mtid, match.turn, 2).read_bytes())
+        self.send_command("Eval", games.merge_turns_script(match, self.upload_path()))
 
     def upload_path(self):
         """
@@ -303,7 +330,29 @@ class ClientSession:
             if opponent:
                 opponent.send_command("OpponentCommitTurn", match.mtid, 0)
             if len(match.submitted) == 2:
-                log.warning("Match %d: both turns are in, but merging turns isn't implemented yet", match.mtid)
+                self.start_merge(match, after_submit=True)
+        elif kind == "MT_MERGED":
+            # MT_MERGED TAB match ID TAB turn: the result of start_merge.
+            match = store.get(header[1])
+            turn = int(header[2]) if len(header) > 2 and header[2].isdigit() else -1
+            if match is None or match.turn != turn or len(match.submitted) != 2:
+                log.warning("%s stale merge result for match %r turn %r, ignored", self.peer, header[1], turn)
+                return
+            store.base_file(match.mtid, turn + 1).write_bytes(data)
+            match.turn += 1
+            match.submitted = []
+            match.merging = None
+            store.save()
+            log.info("%s match %d advanced to turn %d", self.peer, match.mtid, match.turn)
+            for username in (match.player1, match.player2):
+                session = self.server.session_for(username)
+                if session is None:
+                    continue
+                if session is self and self.merge_after_submit:
+                    # The second player to submit sees the result straight away.
+                    self.send_command("TurnFiledAndAdvanced", match.mtid)
+                else:
+                    session.send_command("NotifyTurn", match.mtid, match.opponent_of(username))
         else:
             log.warning("%s unhandled upload type %r", self.peer, kind)
 
