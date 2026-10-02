@@ -22,12 +22,7 @@ def pretty_print_function(function_name, namespace="", arguments=None, call_type
         else:
             function_call += "%s." % arguments[0]
         arguments = arguments[1:]
-    function_call += "%s(" % function_name
-    if len(arguments) == 0:
-        function_call += ")"
-    else:
-        for arg in arguments:
-            function_call += "%s, " % arg if arg is not arguments[-1] else "%s)" % arg
+    function_call += "%s(%s)" % (function_name, ", ".join(str(arg) for arg in arguments))
     return function_call
 
 
