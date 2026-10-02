@@ -420,6 +420,13 @@ def decompile(dso, sink=None, in_function=False, offset=0):
                     float_stack.pop()
                 continue
             opcode_before_dest = get_opcode(dso.version, dso.code[jmp_target - 2])
+            if opcode_before_dest == "OP_JMP":
+                # The value may be the operand of a shorter instruction (i.e. "return <string>;" at the end of
+                # the body). A real JMP there skips past an else (forward) or continues a foreach (OP_ITER).
+                jmp_dest = get_jmp_target(dso, jmp_target - 1, code_inserts, offset)
+                if jmp_dest < jmp_target and \
+                        (jmp_dest >= len(dso.code) or get_opcode(dso.version, dso.code[jmp_dest]) != "OP_ITER"):
+                    opcode_before_dest = None
             # Probably ambiguous :(
             if opcode_before_dest == "OP_JMP":  # If-then-else construction or ternary operator
                 # Test if this is a ternary expression, i.e (a ? b : c)
