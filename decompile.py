@@ -534,7 +534,7 @@ def decompile(dso, sink=None, in_function=False, offset=0):
             float_stack.append("%s - %s" % (float_stack.pop(), float_stack.pop()))
         elif opcode == "OP_NEG":
             op1 = float_stack.pop()
-            if op1 is not str:
+            if not isinstance(op1, str):
                 float_stack.append(-1 * op1)
             else:
                 if op1.startswith("-"):
