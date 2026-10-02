@@ -179,9 +179,11 @@ class ClientSession:
             # The client schedules kick() on its own connection 60 seconds after connecting, and nothing
             # in the client cancels it. Cancel it from here.
             self.send_command("Eval", "cancel($serverCon.kickSched);")
-        # The original server pushed these after login without being asked.
+        # The original server pushed these after login without being asked. It also sent HasDLCStatus, but
+        # that isn't sent here: the client stores the paid DLC as a local flag that HasDLCStatus 1 switches on
+        # (and quits for a restart), and the original server only did that after checking the purchase with
+        # Steam. Without it, the client keeps the DLC status it already has.
         self.send_command("setMyStats", self.level)
-        self.send_command("HasDLCStatus", 1)
         self.send_file(lobby.ACTIVE_GAMES_PATH, lobby.active_games([]))
 
     async def receive_file(self, fields):
