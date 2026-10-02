@@ -1,4 +1,3 @@
-from __future__ import print_function
 import sys
 import struct
 import argparse
@@ -11,10 +10,10 @@ from decompile import decompile
 class DSOFile:
     def __init__(self, path):
         with open(path, 'rb') as f:
-            self.version, = struct.unpack("L", f.read(4))
-            size, = struct.unpack("L", f.read(4))
+            self.version, = struct.unpack("<I", f.read(4))
+            size, = struct.unpack("<I", f.read(4))
             self.global_string_table = f.read(size)
-            size, = struct.unpack("L", f.read(4))
+            size, = struct.unpack("<I", f.read(4))
             self.function_string_table = f.read(size)
             self.global_float_table = []
             self.function_float_table = []
@@ -26,7 +25,7 @@ class DSOFile:
 
     @staticmethod
     def dump_string_table(st):
-        return [s.encode('string_escape') for s in st.split("\x00")]
+        return [s.decode("latin-1").encode("unicode_escape").decode("ascii") for s in st.split(b"\x00")]
 
     def read_floats(self, fd):
         """
@@ -39,10 +38,10 @@ class DSOFile:
                 ft.append(f)
             return ft
 
-        size, = struct.unpack("L", fd.read(4))
+        size, = struct.unpack("<I", fd.read(4))
         if size > 0:
             self.global_float_table = read_float_table(size, fd)
-        size, = struct.unpack("L", fd.read(4))
+        size, = struct.unpack("<I", fd.read(4))
         if size > 0:
             self.function_float_table = read_float_table(size, fd)
 
@@ -50,19 +49,19 @@ class DSOFile:
         """
         Reads the file's bytecode.
         """
-        (code_size, line_break_pair_count) = struct.unpack("LL", fd.read(8))
+        (code_size, line_break_pair_count) = struct.unpack("<II", fd.read(8))
         # The code size is a number of opcodes and arguments, not a number of bytes.
         count = 0
         while count < code_size:
             value, = struct.unpack("B", fd.read(1))
             count += 1
             if value == 0xFF:
-                value = struct.unpack("L", fd.read(4))[0]
+                value = struct.unpack("<I", fd.read(4))[0]
             self.code.append(value)
 
         count = 0
         while count < line_break_pair_count * 2:
-            value, = struct.unpack("L", fd.read(4))
+            value, = struct.unpack("<I", fd.read(4))
             count += 1
             self.linebreak_pairs.append(value)
 
@@ -97,11 +96,11 @@ class DSOFile:
         Their offset into the StringTable has to be patched in the code where zero values
         have been set as placeholders.
         """
-        size, = struct.unpack("L", fd.read(4))
+        size, = struct.unpack("<I", fd.read(4))
         for i in range(0, size):
-            offset, count = struct.unpack("LL", fd.read(8))
+            offset, count = struct.unpack("<II", fd.read(8))
             for j in range(0, count):
-                location_to_patch, = struct.unpack("L", fd.read(4))
+                location_to_patch, = struct.unpack("<I", fd.read(4))
                 self.code[location_to_patch] = offset
 
 

@@ -54,29 +54,29 @@ class MTHeader:
 
 def parse_mt(path):
     with open(path, 'rb') as f:
-        if f.read(4) != "\x06\x00\x00\x00":
-            print "Wrong magic!"
+        if f.read(4) != b"\x06\x00\x00\x00":
+            print("Wrong magic!")
             return
 
         header_size, = struct.unpack("B", f.read(1))
         if header_size > 0:
-            header = f.read(header_size)
+            header = f.read(header_size).decode("utf-8", "replace")
             h = MTHeader(header)
-            print h
+            print(h)
 
         """if not skip_zero(f): return
-        number_of_units, = struct.unpack("L", f.read(4))
+        number_of_units, = struct.unpack("<I", f.read(4))
         if not skip_zero(f): return
-        print "Number of units: %d" % number_of_units
+        print("Number of units: %d" % number_of_units)
         for i in range(0, number_of_units):
             type_size, = struct.unpack("xB", f.read(2))
             type = f.read(type_size)
-            print hex(f.tell())
+            print(hex(f.tell()))
             team, = struct.unpack(">2xL12x", f.read(18))
             waypoints, x, y = struct.unpack("l8x2f8x", f.read(28))
-            print "%s (Player %d, X=%f, Y=%f, WP=%d)" % (type, team, x, y, waypoints)
+            print("%s (Player %d, X=%f, Y=%f, WP=%d)" % (type, team, x, y, waypoints))
             f.read((waypoints - 1) * 22) # Burn waypoint info for now
-            print f.tell()"""
+            print(f.tell())"""
 
 if __name__ == "__main__":
     parse_mt(sys.argv[1])

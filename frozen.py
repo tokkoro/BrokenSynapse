@@ -1,4 +1,4 @@
-#!/bin/python
+#!/usr/bin/env python3
 
 import hashlib
 import socket
@@ -11,54 +11,63 @@ PORT = 28021
 ACTIVE_GAMES = []
 
 
+def send(s, message):
+    s.sendall(message.encode("utf-8"))
+
+
+def recv(s, size):
+    return s.recv(size).decode("utf-8", "replace")
+
+
 def hash_password(password, salt):
-    return hashlib.md5(salt + hashlib.md5(password).hexdigest().upper()).hexdigest().upper()
+    inner = hashlib.md5(password.encode("utf-8")).hexdigest().upper()
+    return hashlib.md5((salt + inner).encode("utf-8")).hexdigest().upper()
 
 
 def handle_writefile(s, commandline):
     data = s.recv(10000)
     decompress = zlib.decompressobj(-zlib.MAX_WBITS)
     filename = commandline.split("\t")[1]
-    s.send("fileFinished\t%s" % filename)
+    send(s, "fileFinished\t%s" % filename)
 
     # Handle special files
     if filename == "psychoff/rankings.txt": # Online players
-        lines = decompress.decompress(data).split("\n")
-        print "%s online players: " % lines[0]
+        lines = decompress.decompress(data).decode("utf-8", "replace").split("\n")
+        print("%s online players: " % lines[0])
         for line in lines[1:]:
-            print "\t%s (%s)" % (line.split("\t")[0], line.split("\t")[1])
+            print("\t%s (%s)" % (line.split("\t")[0], line.split("\t")[1]))
         return
 
     if filename == "psychoff/activeGames.txt": # Active games
-        game_list = decompress.decompress(data).split("\n")
+        game_list = decompress.decompress(data).decode("utf-8", "replace").split("\n")
         if len(game_list) > 1:
-            print "Active games:"
+            print("Active games:")
             for line in game_list[1:]:
                 game_details = line.split("\t")
-                print "\t%s against %s (#%s)" % (game_details[2], game_details[1], game_details[0])
+                print("\t%s against %s (#%s)" % (game_details[2], game_details[1], game_details[0]))
                 ACTIVE_GAMES.append(game_details[0])
                 return
 
     if filename.endswith(".enc"):
-        print "Dumping MultiTurn data."
-        with open("testMT.enc", "w") as f:
+        print("Dumping MultiTurn data.")
+        with open("testMT.enc", "wb") as f:
             f.write(data)
         return
 
-    return decompress.decompress(data)
+    return decompress.decompress(data).decode("utf-8", "replace")
 
 
 def login(s, username, password):
-    s.send("textcom\tprelogon\n")
-    salt_rec = s.recv(1024)
+    send(s, "textcom\tprelogon\n")
+    salt_rec = recv(s, 1024)
     salt = salt_rec.split("\t")[-2]
-    s.send("textcom\tlogin\t%s\t%s\t33\n" % (username, hash_password(password, salt)))
-    logged_in = s.recv(1024)
+    send(s, "textcom\tlogin\t%s\t%s\t33\n" % (username, hash_password(password, salt)))
+    logged_in = recv(s, 1024)
     if "loggedIn" in logged_in:
-        print "*** Successfully logged in as %s!" % username
+        print("*** Successfully logged in as %s!" % username)
         return True
     else:
-        print "[!] Error: could not log in: %s." % logged_in
+        print("[!] Error: could not log in: %s." % logged_in)
         return False
 
 
@@ -67,13 +76,13 @@ s.connect((HOST, PORT))
 if not login(s, "[username]", "[password]"):
     sys.exit(-1)
 
-s.send("textcom\tcommand\tsetMyOS\twindows.steam\n")
-s.send("textcom\tcommand\trefreshPeopleOnline\n")
-s.send("textcom\tcommand\trequestHomeScreen\n")  # Request home screen messages
-# s.send("textcom\tcommand\tselectMT\t[game ID]\n")
+send(s, "textcom\tcommand\tsetMyOS\twindows.steam\n")
+send(s, "textcom\tcommand\trefreshPeopleOnline\n")
+send(s, "textcom\tcommand\trequestHomeScreen\n")  # Request home screen messages
+# send(s, "textcom\tcommand\tselectMT\t[game ID]\n")
 
 while True:
-    data = s.recv(1024)
+    data = recv(s, 1024)
     requests = data.split("\n")
     for request in requests:
         if not request: continue
@@ -83,19 +92,19 @@ while True:
         if splitted[0] == "writeFile":
             read = handle_writefile(s, request)
             if read:
-                print "File received: %s:\n----------\n%s\n----------" % (request.split("\t")[1], read)
+                print("File received: %s:\n----------\n%s\n----------" % (request.split("\t")[1], read))
 
         elif splitted[0] == "textcom" and splitted[1] == "command":
             if splitted[2] == "setMyStats":
-                print "You are currently level %s." % splitted[3]
+                print("You are currently level %s." % splitted[3])
             elif splitted[2] == "HasDLCStatus":
-                print "Red DLC is activated for your account!" if splitted[3] == "1" else "Red DLC is not activated for your account."
+                print("Red DLC is activated for your account!" if splitted[3] == "1" else "Red DLC is not activated for your account.")
             elif splitted[2] == "ping":
-                print "* Server ping *"
+                print("* Server ping *")
             elif splitted[2] == "ack" or splitted[2] == "SetSocketMode" or splitted[2] == "oppDisplayStatusChanged":
                 continue
             else:
-                print "*** Received: %s" % request
+                print("*** Received: %s" % request)
 
         else:
-            print "*** Received: %s" % request
+            print("*** Received: %s" % request)
