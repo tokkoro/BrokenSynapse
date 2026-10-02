@@ -2,8 +2,10 @@
 
 A replacement for the game's offline "Grand Server", so Frozen Synapse can be played on a LAN.
 
-**Stage 1 (current):** accepts any username and password and logs all traffic both ways. There is no lobby or
-gameplay yet.
+**Current stage:** accepts any username and password, fills the lobby (news, online players, an empty friends list,
+no active games, a short feed) and logs all traffic both ways. There is no gameplay yet.
+
+`fsserver.py` handles connections and messages; `lobby.py` builds the lobby's text files.
 
 ## Running
 

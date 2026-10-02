@@ -2,12 +2,13 @@
 """
 Minimal Frozen Synapse Grand Server for LAN play.
 
-Stage 1: accepts any login and logs all traffic both ways, so the protocol can be studied
-against a real client. Messages are tab-separated lines ending in "\n"; file bodies follow a
-"writeFile" line as raw bytes.
+Accepts any login, answers the lobby's requests and logs all traffic both ways, so the protocol can
+be studied against a real client. Messages are tab-separated lines ending in "\n"; file bodies follow
+a "writeFile" line as raw bytes.
 """
 import argparse
 import asyncio
+import collections
 import itertools
 import logging
 import secrets
@@ -15,7 +16,21 @@ import time
 import zlib
 from pathlib import Path
 
+import lobby
+
 log = logging.getLogger("fsserver")
+
+MOTD_HEADLINE = "Welcome to the LAN server"
+MOTD_TEXT = "This server replaces the offline Grand Server.\nOnly logging in and the lobby work so far."
+FEED_TEXT = "\nWelcome to the LAN server."
+
+
+def compress(data):
+    """
+    Compresses a file body the way the original server did: raw deflate, without a zlib header.
+    """
+    compressor = zlib.compressobj(9, zlib.DEFLATED, -zlib.MAX_WBITS)
+    return compressor.compress(data) + compressor.flush()
 
 
 def decompress(data):
@@ -39,6 +54,12 @@ class ClientSession:
         self.peer = "%s:%d" % (host, port)
         self.username = None
         self.session_id = None
+        self.level = 1
+        self.wins = 0
+        self.losses = 0
+        # Like the client, send nothing else while a file waits for its fileFinished.
+        self.outgoing = collections.deque()
+        self.file_in_flight = None
 
     async def run(self):
         log.info("%s connected", self.peer)
@@ -62,15 +83,35 @@ class ClientSession:
             self.writer.close()
 
     def send_line(self, *fields):
-        text = "\t".join(str(f) for f in fields)
-        log.info("%s S>C %r", self.peer, text)
-        self.writer.write((text + "\n").encode("latin-1"))
+        self.outgoing.append(("line", "\t".join(str(f) for f in fields)))
+        self.flush()
 
     def send_command(self, name, *args):
         """
         Calls clientCmd<name>(args...) on the client.
         """
         self.send_line("textcom", "command", name, *args)
+
+    def send_file(self, path, lines):
+        """
+        Sends a file the client saves at path. Files are always compressed, like the original server's.
+        """
+        self.outgoing.append(("file", path, lobby.encode(lines)))
+        self.flush()
+
+    def flush(self):
+        while self.outgoing and self.file_in_flight is None:
+            item = self.outgoing.popleft()
+            if item[0] == "line":
+                log.info("%s S>C %r", self.peer, item[1])
+                self.writer.write((item[1] + "\n").encode("latin-1"))
+            else:
+                path, data = item[1], item[2]
+                body = compress(data)
+                header = "writeFile\t%s\t%d\tgz\t%d" % (path, len(body), len(data))
+                log.info("%s S>C %r (%r)", self.peer, header, data[:200].decode("latin-1"))
+                self.writer.write((header + "\n").encode("latin-1") + body)
+                self.file_in_flight = path
 
     async def handle_line(self, text):
         fields = text.split("\t")
@@ -80,7 +121,11 @@ class ClientSession:
         elif kind == "writefile":
             await self.receive_file(fields)
         elif kind == "filefinished":
-            pass  # The client confirms a file we sent. Nothing is sent yet.
+            path = fields[1] if len(fields) > 1 else ""
+            if path != self.file_in_flight:
+                log.warning("%s fileFinished for %r, but %r was in flight", self.peer, path, self.file_in_flight)
+            self.file_in_flight = None
+            self.flush()
         elif text:
             log.warning("%s unknown message type %r", self.peer, fields[0])
 
@@ -98,7 +143,7 @@ class ClientSession:
             self.log_in(fields[1])
         elif kind == "servercheck":
             # The ADVANCED dialog's connection test.
-            self.send_command("ServerRespond", len([s for s in self.server.sessions if s.username]))
+            self.send_command("ServerRespond", len(self.server.players()))
         elif kind == "lostpassword":
             self.send_command("Info", "Password recovery is not supported on this server.")
         elif kind == "command" and len(fields) > 1:
@@ -110,10 +155,19 @@ class ClientSession:
         # commandToServer() always pads to 15 argument slots.
         while args and args[-1] == "":
             args.pop()
-        if name.lower() == "ping":
-            # The client pings every 8 seconds and expects no reply: a Ping command from the server makes it
-            # ping again immediately.
+        name = name.lower()
+        if name in ("ping", "setmyos", "setclientingamestatus", "setdarkstatus", "selectsteamsessionid"):
+            # The client pings every 8 seconds and expects no reply: a Ping command from the server makes
+            # it ping again immediately. The status updates need no reply either.
             pass
+        elif name == "requesthomescreen":
+            self.send_file(lobby.HOME_SCREEN_PATH, lobby.home_screen(MOTD_HEADLINE, MOTD_TEXT))
+        elif name == "refreshpeopleonline":
+            self.send_file(lobby.ONLINE_PLAYERS_PATH, lobby.online_players(self.server.players()))
+        elif name == "requestfriends":
+            self.send_file(lobby.FRIENDS_LIST_PATH, lobby.friends_list())
+        elif name == "requestfeed":
+            self.send_file(lobby.FEED_PATH, lobby.feed(FEED_TEXT))
         else:
             log.info("%s unhandled command %s %r", self.peer, name, args)
 
@@ -125,6 +179,10 @@ class ClientSession:
             # The client schedules kick() on its own connection 60 seconds after connecting, and nothing
             # in the client cancels it. Cancel it from here.
             self.send_command("Eval", "cancel($serverCon.kickSched);")
+        # The original server pushed these after login without being asked.
+        self.send_command("setMyStats", self.level)
+        self.send_command("HasDLCStatus", 1)
+        self.send_file(lobby.ACTIVE_GAMES_PATH, lobby.active_games([]))
 
     async def receive_file(self, fields):
         """
@@ -165,6 +223,12 @@ class GrandServer:
         self.cancel_kick = cancel_kick
         self.sessions = set()
         self.session_ids = itertools.count(1000)
+
+    def players(self):
+        """
+        Sessions that have logged in.
+        """
+        return sorted((s for s in self.sessions if s.username), key=lambda s: s.username.lower())
 
     async def on_connect(self, reader, writer):
         session = ClientSession(self, reader, writer)
