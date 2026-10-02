@@ -59,3 +59,4 @@ target/
 # LAN server runtime output
 server/logs/
 server/uploads/
+server/data/

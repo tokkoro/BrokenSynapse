@@ -16,12 +16,13 @@ import time
 import zlib
 from pathlib import Path
 
+import games
 import lobby
 
 log = logging.getLogger("fsserver")
 
 MOTD_HEADLINE = "Welcome to the LAN server"
-MOTD_TEXT = "This server replaces the offline Grand Server.\nOnly logging in and the lobby work so far."
+MOTD_TEXT = "This server replaces the offline Grand Server.\nMatches can be created, but turns don't advance yet."
 FEED_TEXT = "\nWelcome to the LAN server."
 
 
@@ -92,12 +93,22 @@ class ClientSession:
         """
         self.send_line("textcom", "command", name, *args)
 
-    def send_file(self, path, lines):
+    def send_file(self, path, data):
         """
         Sends a file the client saves at path. Files are always compressed, like the original server's.
         """
-        self.outgoing.append(("file", path, lobby.encode(lines)))
+        self.outgoing.append(("file", path, data))
         self.flush()
+
+    def send_lobby_file(self, path, lines):
+        self.send_file(path, lobby.encode(lines))
+
+    def send_active_games(self):
+        rows = []
+        for m in self.server.store.for_player(self.username):
+            needs_turn = int(not m.has_submitted(self.username))
+            rows.append((m.mtid, m.opponent_of(self.username), m.game_mode, m.info, 0, needs_turn, m.turn))
+        self.send_lobby_file(lobby.ACTIVE_GAMES_PATH, lobby.active_games(rows))
 
     def flush(self):
         while self.outgoing and self.file_in_flight is None:
@@ -161,13 +172,17 @@ class ClientSession:
             # it ping again immediately. The status updates need no reply either.
             pass
         elif name == "requesthomescreen":
-            self.send_file(lobby.HOME_SCREEN_PATH, lobby.home_screen(MOTD_HEADLINE, MOTD_TEXT))
+            self.send_lobby_file(lobby.HOME_SCREEN_PATH, lobby.home_screen(MOTD_HEADLINE, MOTD_TEXT))
         elif name == "refreshpeopleonline":
-            self.send_file(lobby.ONLINE_PLAYERS_PATH, lobby.online_players(self.server.players()))
+            self.send_lobby_file(lobby.ONLINE_PLAYERS_PATH, lobby.online_players(self.server.players()))
         elif name == "requestfriends":
-            self.send_file(lobby.FRIENDS_LIST_PATH, lobby.friends_list())
+            self.send_lobby_file(lobby.FRIENDS_LIST_PATH, lobby.friends_list())
         elif name == "requestfeed":
-            self.send_file(lobby.FEED_PATH, lobby.feed(FEED_TEXT))
+            self.send_lobby_file(lobby.FEED_PATH, lobby.feed(FEED_TEXT))
+        elif name == "playquickmatch":
+            self.play_quick_match(*(args + ["", ""])[:2])
+        elif name == "selectmt":
+            self.select_match(args[0] if args else "")
         else:
             log.info("%s unhandled command %s %r", self.peer, name, args)
 
@@ -184,7 +199,39 @@ class ClientSession:
         # (and quits for a restart), and the original server only did that after checking the purchase with
         # Steam. Without it, the client keeps the DLC status it already has.
         self.send_command("setMyStats", self.level)
-        self.send_file(lobby.ACTIVE_GAMES_PATH, lobby.active_games([]))
+        self.send_active_games()
+
+    def play_quick_match(self, opponent, mode_name):
+        """
+        A challenge from the Create Game dialog. The client generates the map and uploads the new match, like the
+        original server's generateGameMapFromClient asked it to.
+        """
+        if mode_name not in games.QUICK_MATCH_MODES:
+            self.send_command("Error", "This server doesn't support the game mode %s yet." % mode_name)
+        elif opponent.lower() == self.username.lower():
+            self.send_command("Error", "You can't challenge yourself.")
+        elif '"' in opponent or "\\" in opponent:
+            self.send_command("Error", "Invalid opponent name.")
+        else:
+            log.info("%s quick match: %s vs %s, %s", self.peer, self.username, opponent, mode_name)
+            self.send_command("Eval", games.create_match_script(mode_name, self.username, opponent, self.upload_path()))
+
+    def select_match(self, mtid):
+        """
+        Sends a match to the client as psychoff/recMT.enc, with a header describing it for this player.
+        """
+        match = self.server.store.get(mtid)
+        if match is None or not match.side_of(self.username):
+            self.send_command("Error", "Game %s doesn't exist." % mtid)
+            return
+        data = self.server.store.base_file(match.mtid, match.turn).read_bytes()
+        self.send_file("psychoff/recMT.enc", games.replace_enc_header(data, match.client_header(self.username)))
+
+    def upload_path(self):
+        """
+        Where the client uploads games and turns, named after the session ID like the original client did.
+        """
+        return "psychoff/grandServer/rec/rec%s.enc" % self.session_id
 
     async def receive_file(self, fields):
         """
@@ -212,16 +259,59 @@ class ClientSession:
                 (self.server.upload_dir / stem).write_bytes(data)
         self.send_line("fileFinished", path)
 
-        if path.lower().endswith(".steamreg") and data is not None:
+        if data is not None and path.lower().startswith("psychoff/grandserver/rec/") and path.lower().endswith(".enc"):
+            self.handle_upload(data)
+        elif path.lower().endswith(".steamreg") and data is not None:
             # Account creation on Steam builds: username TAB password TAB email TAB Steam ticket.
             username = data.decode("latin-1").split("\t")[0].strip()
             log.info("%s new Steam account %r (accepted)", self.peer, username)
             self.log_in(username)
 
 
+    def handle_upload(self, data):
+        """
+        Handles an uploaded .enc file by its header: a new match (MT_INIT) or a submitted turn (MT_TURN).
+        """
+        header = games.read_enc_header(data)
+        version = int.from_bytes(data[:4], "little")
+        log.info("%s upload header (version %d): %r", self.peer, version, header)
+        kind = header[0]
+        store = self.server.store
+        if kind == "MT_INIT":
+            # MT_INIT TAB player 1 TAB player 2 TAB info TAB game mode TAB turn limit TAB ...
+            player1, player2, info, game_mode, turn_limit = (header + [""] * 6)[1:6]
+            match = store.create(player1, player2, game_mode, info, turn_limit, data)
+            log.info("%s created match %d: %s vs %s, %s", self.peer, match.mtid, player1, player2, game_mode)
+            self.send_command("MTAccepted", match.mtid)
+            opponent = self.server.session_for(match.opponent_of(self.username))
+            if opponent:
+                opponent.send_command("NotifyNewGame", match.mtid, self.username, game_mode, 0, info)
+        elif kind == "MT_TURN":
+            match = store.get(header[1])
+            if match is None or not match.side_of(self.username):
+                log.warning("%s turn for unknown match %r", self.peer, header[1])
+                self.send_command("Error", "Game %s doesn't exist." % header[1])
+                return
+            side = match.side_of(self.username)
+            store.turn_file(match.mtid, match.turn, side).write_bytes(data)
+            if not match.has_submitted(self.username):
+                match.submitted.append(self.username)
+            store.save()
+            log.info("%s turn %d of match %d submitted by %s", self.peer, match.turn, match.mtid, self.username)
+            self.send_command("TurnFiled", match.mtid)
+            opponent = self.server.session_for(match.opponent_of(self.username))
+            if opponent:
+                opponent.send_command("OpponentCommitTurn", match.mtid, 0)
+            if len(match.submitted) == 2:
+                log.warning("Match %d: both turns are in, but merging turns isn't implemented yet", match.mtid)
+        else:
+            log.warning("%s unhandled upload type %r", self.peer, kind)
+
+
 class GrandServer:
-    def __init__(self, upload_dir, cancel_kick):
+    def __init__(self, upload_dir, data_dir, cancel_kick):
         self.upload_dir = upload_dir
+        self.store = games.MatchStore(data_dir)
         self.cancel_kick = cancel_kick
         self.sessions = set()
         self.session_ids = itertools.count(1000)
@@ -231,6 +321,12 @@ class GrandServer:
         Sessions that have logged in.
         """
         return sorted((s for s in self.sessions if s.username), key=lambda s: s.username.lower())
+
+    def session_for(self, username):
+        for s in self.sessions:
+            if s.username and s.username.lower() == username.lower():
+                return s
+        return None
 
     async def on_connect(self, reader, writer):
         session = ClientSession(self, reader, writer)
@@ -245,6 +341,7 @@ async def main():
     parser.add_argument("--port", type=int, default=28021, help="Port to listen on (default: 28021).")
     parser.add_argument("--log-dir", type=Path, default=here / "logs", help="Where session logs are written.")
     parser.add_argument("--upload-dir", type=Path, default=here / "uploads", help="Where received files are saved.")
+    parser.add_argument("--data-dir", type=Path, default=here / "data", help="Where matches are stored.")
     parser.add_argument("--no-cancel-kick", action="store_true",
                         help="Don't cancel the client's 60 second kick timer after login.")
     parser.add_argument("--verbose", action="store_true", help="Also log the client's keepalive pings.")
@@ -256,7 +353,7 @@ async def main():
                         format="%(asctime)s %(levelname)s %(message)s",
                         handlers=[logging.StreamHandler(), logging.FileHandler(log_file, encoding="utf-8")])
 
-    server = GrandServer(args.upload_dir, not args.no_cancel_kick)
+    server = GrandServer(args.upload_dir, args.data_dir, not args.no_cancel_kick)
     listener = await asyncio.start_server(server.on_connect, args.host, args.port)
     log.info("Listening on %s:%d, logging to %s", args.host, args.port, log_file)
     async with listener:
