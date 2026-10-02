@@ -55,3 +55,7 @@ docs/_build/
 
 # PyBuilder
 target/
+
+# LAN server runtime output
+server/logs/
+server/uploads/
