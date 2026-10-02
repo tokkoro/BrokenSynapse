@@ -2,6 +2,8 @@
 
 A replacement for the game's offline "Grand Server", so Frozen Synapse can be played on a LAN.
 
+**Setting up a server to play?** See [server.md](server.md). This README is for developers.
+
 **Current stage:** accepts any username and password, fills the lobby, and creates matches from the Create Game
 dialog (quick match against a named opponent) and plays them turn by turn. All traffic is logged both ways.
 
