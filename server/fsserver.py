@@ -48,7 +48,8 @@ class ClientSession:
                 if not line:
                     break
                 text = line.decode("latin-1").rstrip("\r\n")
-                log.info("%s C>S %r", self.peer, text)
+                is_ping = text.lower().startswith("textcom\tcommand\tping\t")
+                log.log(logging.DEBUG if is_ping else logging.INFO, "%s C>S %r", self.peer, text)
                 await self.handle_line(text)
                 await self.writer.drain()
         except (ConnectionError, asyncio.IncompleteReadError) as e:
@@ -108,7 +109,9 @@ class ClientSession:
         while args and args[-1] == "":
             args.pop()
         if name.lower() == "ping":
-            self.send_command("Ping")
+            # The client pings every 8 seconds and expects no reply: a Ping command from the server makes it
+            # ping again immediately.
+            pass
         else:
             log.info("%s unhandled command %s %r", self.peer, name, args)
 
@@ -176,11 +179,13 @@ async def main():
     parser.add_argument("--upload-dir", type=Path, default=here / "uploads", help="Where received files are saved.")
     parser.add_argument("--no-cancel-kick", action="store_true",
                         help="Don't cancel the client's 60 second kick timer after login.")
+    parser.add_argument("--verbose", action="store_true", help="Also log the client's keepalive pings.")
     args = parser.parse_args()
 
     args.log_dir.mkdir(parents=True, exist_ok=True)
     log_file = args.log_dir / ("fsserver-%s.log" % time.strftime("%Y%m%d-%H%M%S"))
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
+    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
+                        format="%(asctime)s %(levelname)s %(message)s",
                         handlers=[logging.StreamHandler(), logging.FileHandler(log_file, encoding="utf-8")])
 
     server = GrandServer(args.upload_dir, not args.no_cancel_kick)
